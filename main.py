@@ -57,7 +57,7 @@ def compose_prompt(question, chunks):
     )
     return prompt
 
-def query_gpt(client, prompt, model="gpt-4o-mini"):
+def query_gpt(client, prompt, model="gpt-4.1"):
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
