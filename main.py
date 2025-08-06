@@ -1,4 +1,5 @@
 import streamlit as st
+import fitz  # PyMuPDF
 from openai import OpenAI
 from pinecone import Pinecone
 import tiktoken
@@ -9,8 +10,14 @@ def init_openai_client():
 
 @st.cache_resource
 def init_pinecone_client():
-    # Use new Pinecone client initialization style (no deprecated init)
     return Pinecone(api_key=st.secrets["pinecone_api_key"])
+
+def extract_text_from_pdf(file) -> str:
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
 
 def embed_text(text: str, client: OpenAI, model="text-embedding-3-small"):
     response = client.embeddings.create(input=text, model=model)
@@ -26,6 +33,18 @@ def search_pinecone(index, query_embedding, source_filter, top_k=5):
         namespace="__default__"
     )
     return results.matches
+
+def compose_prompt_for_compliance(policy_text, chunks):
+    context_text = "\n\n".join([f"Chunk {i+1}:\n{chunk['metadata']['text']}" for i, chunk in enumerate(chunks)])
+    prompt = (
+        "You are an expert compliance assistant. Given the following policy text and document chunks from a report, "
+        "analyze whether the report complies with the policy. Provide a detailed explanation with reasons, "
+        "highlighting which parts of the report comply or do not comply with the policy.\n\n"
+        f"Policy Text:\n{policy_text}\n\n"
+        f"Report Chunks:\n{context_text}\n\n"
+        "Compliance Analysis:"
+    )
+    return prompt
 
 def compose_prompt(question, chunks):
     context_text = "\n\n".join([f"Chunk {i+1}:\n{chunk['metadata']['text']}" for i, chunk in enumerate(chunks)])
@@ -51,12 +70,6 @@ def main():
     st.set_page_config(page_title="ISO Standards Assistant", layout="wide")
 
     st.title("📄 ISO Standards Document Assistant")
-    st.markdown(
-        """
-        Welcome! This app helps you interact with ISO standards documents.
-        Select a report and a function from the sidebar, then enter your query or policy text.
-        """
-    )
 
     openai_client = init_openai_client()
     pinecone_client = init_pinecone_client()
@@ -70,7 +83,7 @@ def main():
     st.sidebar.markdown("**Instructions:**")
     st.sidebar.markdown(
         """
-        - **Policy Presence Check:** Paste a policy text to check if it is addressed in the selected report.
+        - **Policy Presence Check:** Upload a policy PDF to check if the selected report complies with it.
         - **Detailed Chatbot:** Ask detailed questions about the selected report.
         - **Summary & Key Findings:** Generate a summary and key findings of the selected report.
         """
@@ -79,7 +92,33 @@ def main():
     st.write(f"### Selected Report: {report}")
     st.write(f"### Selected Function: {function}")
 
-    if function == "Summary & Key Findings":
+    if function == "Policy Presence Check":
+        uploaded_file = st.file_uploader("Upload Policy PDF", type=["pdf"])
+        if uploaded_file is not None:
+            with st.spinner("Extracting policy text from PDF..."):
+                policy_text = extract_text_from_pdf(uploaded_file)
+            st.markdown("**Extracted Policy Text Preview:**")
+            st.write(policy_text[:1000] + "..." if len(policy_text) > 1000 else policy_text)
+
+            if st.button("Check Compliance"):
+                with st.spinner("Embedding policy and searching report..."):
+                    policy_embedding = embed_text(policy_text, openai_client)
+                    matches = search_pinecone(index, policy_embedding, source_filter=report, top_k=5)
+
+                    if not matches:
+                        st.warning("No relevant information found in the selected report.")
+                        return
+
+                    for m in matches:
+                        if "text" not in m.metadata:
+                            m.metadata["text"] = "Text not available."
+
+                    prompt = compose_prompt_for_compliance(policy_text, matches)
+                    answer = query_gpt(openai_client, prompt)
+                    st.markdown("**Compliance Analysis:**")
+                    st.write(answer)
+
+    elif function == "Summary & Key Findings":
         if st.button("Generate Summary & Key Findings"):
             with st.spinner("Generating summary..."):
                 query_text = "Provide a detailed summary and key findings of the report."
@@ -95,11 +134,11 @@ def main():
                 st.markdown("**Summary & Key Findings:**")
                 st.write(answer)
 
-    else:
+    else:  # Detailed Chatbot
         user_input = st.text_area(
-            "Enter your policy text or question here:",
+            "Enter your question here:",
             height=200,
-            placeholder="Paste policy text or ask your question..."
+            placeholder="Ask detailed questions about the selected report..."
         )
 
         if st.button("Submit") and user_input.strip():
@@ -117,25 +156,12 @@ def main():
 
                 prompt = compose_prompt(user_input, matches)
 
-                if function == "Policy Presence Check":
-                    prompt = (
-                        "You are an expert assistant. Based on the following document chunks, "
-                        "determine if the given policy is present or addressed in the document. "
-                        "Provide a detailed explanation with references to the chunks.\n\n"
-                        + prompt
-                    )
-                elif function == "Detailed Chatbot":
-                    prompt = (
-                        "You are an expert assistant. Use the following document chunks to answer the user's question in detail.\n\n"
-                        + prompt
-                    )
-
                 answer = query_gpt(openai_client, prompt)
                 st.markdown("**Response:**")
                 st.write(answer)
 
     st.markdown("---")
-    st.markdown("Developed by NST | Powered by OpenAI GPT-4.1 & Pinecone")
+    st.markdown("Developed by YourName | Powered by OpenAI GPT-4.1 & Pinecone")
 
 if __name__ == "__main__":
     main()
